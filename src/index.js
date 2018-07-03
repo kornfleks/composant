@@ -5,25 +5,56 @@ const lifecycleEvents = [
     'onUpdate'
 ]
 
-var createNode = (name, props, children, text, lifecycles, key) => ({
+const createNode = (name, props, children, text, lifecycles, key, isGhost) => ({
     name,
     props,
     children,
     text,
     lifecycles,
-    key
+    key,
+    isGhost
 })
 
-var eventProxy = (event) => {
+const eventProxy = (event) => {
     event.currentTarget.events[event.type](event)
 }
 
 var transformStyle = style => {
     let inlineStyle = ''
     for (const propKey in style) {
-        inlineStyle += `${propKey.replace(/([A-Z])/g, '-$1')}:${style[propKey]};`
+        inlineStyle += `${propKey.replace(/([A-Z])/g, '-$1').toLocaleLowerCase()}:${style[propKey]};`
     }
-    return inlineStyle.toLowerCase()
+    return inlineStyle
+}
+
+const areNodeEquals = (node1, node2) => {
+    const props1 = node1.props
+    const props2 = node2.props
+    if (node1.children !== node2.children) return false;
+    for (const key in props1) {
+        if (props1[key] !== props2[key]) return false;
+    }
+    for (const key in props2) {
+        if (props1[key] !== props2[key]) return false;
+    }
+    return true
+}
+
+const applyAttribute = (element, attributeName, attribute) => {
+    if (attributeName === 'children') {
+        return;
+    }
+    if (attributeName.indexOf('on') === 0) {
+        const eventType = attributeName.slice(2).toLowerCase()
+        element.events[eventType] = attribute
+        element.addEventListener(eventType, eventProxy)
+    } else if (attributeName === 'className') {
+        element.setAttribute('class', attribute)
+    } else if (attributeName === 'style' && typeof attribute === 'object') {
+        element.setAttribute('style', transformStyle(attribute))
+    } else if (attributeName !== 'key') {
+        element.setAttribute(attributeName, attribute)
+    }
 }
 
 var createElement = (node) => {
@@ -31,81 +62,49 @@ var createElement = (node) => {
         ? document.createTextNode(node.text)
         : document.createElement(node.name)
 
-    var {
-        props
-    } = node
-
-    if (!props) return element
-
+    const { props } = node
     element.events = {}
 
     for (var propKey in props) {
-
-        const prop = props[propKey]
-        if (propKey === 'children') {
-            continue;
-        }
-
-        if (propKey.indexOf('on') === 0) {
-            const eventType = propKey.slice(2).toLowerCase()
-            element.events[eventType] = prop
-            element.addEventListener(eventType, eventProxy)
-        } else if (propKey === 'className') {
-            element.setAttribute('class', prop)
-        } else if (propKey === 'style' && typeof prop === 'object') {
-            element.setAttribute('style', transformStyle(prop))
-        } else if (propKey !== 'key')  {
-            element.setAttribute(propKey, prop)
-        }
-
+        applyAttribute(element, propKey, props[propKey])
     }
 
     return element
 }
 
-var renderNode = (node, container, referenceNode) => {
-    if (node.name === null && node.text === null) {
-
+var renderNode = (node, container, nextElement) => {
+    if (node.isGhost) {
         for (let i = 0; i < node.children.length; i++) {
             if (node.children[i]) {
-                renderNode(node.children[i], container, referenceNode)
+                renderNode(node.children[i], container, nextElement)
             }
         }
-
-        return;
-    }
-    if (typeof node.name === 'function') {
-        if (typeof node.children[0].name === 'function') {
-            node.children[0].props = node.props
+        return
+    } else if (typeof node.name === 'function') {
+        if (node.lifecycles.onMount) {
+            node.lifecycles.onMount(node.props)
         }
-        const _fiber = renderNode(node.children[0], container, referenceNode)
-        node._fiber = _fiber
-        return _fiber
-    }
-    var {
-        children
-    } = node
-
-    var element = createElement(node)
-    node._fiber = element
-
-    if (children) {
-        for (let i = 0; i < children.length; i++) {
-            if (children[i]) {
-                renderNode(children[i], element)
-            }
-        }
-    }
-    if (referenceNode) {
-        container.insertBefore(element, referenceNode)
+        return node._ref = renderNode(node.children[0], container, nextElement)
     } else {
-        container.appendChild(element)
-    }
-    if (node.lifecycles.onMount) {
-        node.lifecycles.onMount()
-    }
+        const children = node.children
+        const element = createElement(node)
+        node._ref = element
 
-    return element
+        if (children) {
+            for (let i = 0; i < children.length; i++) {
+                if (children[i]) {
+                    renderNode(children[i], element)
+                }
+            }
+        }
+        if (nextElement) {
+            container.insertBefore(element, nextElement)
+        } else {
+            container.appendChild(element)
+        }
+
+        return element
+    }
 }
 
 const removeChildren = (node) => {
@@ -130,28 +129,26 @@ const patchChildrenNode = (lastNode, nextNode, element, previousElement) => {
     let shouldReorder = false
     for (let i = 0; i < nextChildren.length; i++) {
         const nextChild = nextChildren[i]
-        if (nextChild) {
-            nextKeys[nextChild.key] = nextChild
-        }
+        nextKeys[nextChild.key] = nextChild
     }
     let lastChildElement = previousElement
     for (let i = lastChildren.length - 1; i > -1; i--) {
         const lastChild = lastChildren[i]
         const nextChild = nextKeys[lastChild.key]
-        if (!nextChildren[i] || lastChild.key !== nextChildren[i].key) {
+        if (nextChildren[i] && lastChild.key !== nextChildren[i].key) {
             shouldReorder = true
         }
-        // existant
-        if (lastChild._fiber) {
-            if (nextChild && (nextChild.name || nextChild.text !== null)) {
+        if (lastChild._ref) {
+            if (nextChild && !nextChild.isGhost) {
                 lastKeys[lastChild.key] = lastChild
-                lastChildElement = lastChild._fiber
+                patchNode(lastChild, nextChild)
+                lastChildElement = lastChild._ref
             } else {
                 removeChildren(lastChild)
-                const parent = lastNode._fiber || element
-                parent.removeChild(lastChild._fiber)
+                const parent = lastNode._ref || element
+                parent.removeChild(lastChild._ref)
             }
-        } else if (nextChild && nextChild.name === null && nextChild.text === null) {
+        } else if (nextChild && nextChild.isGhost) {
             lastKeys[lastChild.key] = lastChild
             lastChildElement = patchChildrenNode(lastChild, nextChild, element, lastChildElement)
         }
@@ -163,13 +160,13 @@ const patchChildrenNode = (lastNode, nextNode, element, previousElement) => {
             const lastChild = lastKeys[nextChildren[i].key]
             if (lastChild) {
                 if (lastChildElement) {
-                    element.insertBefore(lastChild._fiber, lastChildElement)
-                    lastChildElement = lastChild._fiber
+                    element.insertBefore(lastChild._ref, lastChildElement)
+                    lastChildElement = lastChild._ref
                 } else {
                     previousElement
-                        ? element.insertBefore(lastChild._fiber, previousElement)
-                        : element.appendChild(lastChild._fiber)
-                    lastChildElement = lastChild._fiber
+                        ? element.insertBefore(lastChild._ref, previousElement)
+                        : element.appendChild(lastChild._ref)
+                    lastChildElement = lastChild._ref
                 }
             }
         }
@@ -180,14 +177,14 @@ const patchChildrenNode = (lastNode, nextNode, element, previousElement) => {
         const nextChild = nextChildren[i]
         const lastChild = lastKeys[nextChild.key]
         if (lastChild) {
-            if (lastChild._fiber) {
-                lastChildElement = lastChild._fiber
-            } else if (lastChild.name === null && lastChild.text === null) {
+            if (lastChild._ref) {
+                lastChildElement = lastChild._ref
+            } else if (lastChild.isGhost) {
                 if (lastChild.children.length > 0) {
-                    lastChildElement = lastChild.children[0]._fiber
+                    lastChildElement = lastChild.children[0]._ref
                 }
             }
-        } else if (nextChild.name || nextChild.text !== null) {
+        } else if (!nextChild.isGhost) {
             lastChildElement = i !== nextChildren.length - 1 && lastChildElement
                 ? renderNode(nextChild, element, lastChildElement)
                 : renderNode(nextChild, element, previousElement)
@@ -196,52 +193,33 @@ const patchChildrenNode = (lastNode, nextNode, element, previousElement) => {
     return lastChildElement
 }
 const patchNode = (lastNode, nextNode) => {
-    nextNode._fiber = lastNode._fiber
+    nextNode._ref = lastNode._ref
 
     if (typeof nextNode.name === 'function') {
-        if (lastNode.props && nextNode.props) {
-            let shouldUpdate = false
-            for (const lastPropKey in lastNode.props) {
-                if (nextNode.props[lastPropKey] !== lastNode.props[lastPropKey]) {
-                    shouldUpdate = true
-                }
-            }
-            for (const nextPropKey in nextNode.props) {
-                if (nextNode.props[nextPropKey] !== lastNode.props[nextPropKey]) {
-                    shouldUpdate = true
-                }
-            }
-            if (!shouldUpdate && lastNode.children === nextNode.children) {
-                return lastNode
-            }
+        if (areNodeEquals(lastNode, nextNode)) {
+            return lastNode
         }
         patchNode(lastNode.children[0], nextNode.children[0])
     } else {
-        const element = lastNode._fiber
+        const element = lastNode._ref
         if (nextNode.text !== null) {
             element.textContent = nextNode.text
             return
         }
         for (const propKey in nextNode.props) {
-            const prop = nextNode.props[propKey]
-            if (propKey.indexOf('on') === 0) {
+            const nextProp = nextNode.props[propKey]
+            if (lastNode.props[propKey] === nextProp) {
                 continue
             }
-            if (propKey === 'style' && typeof prop === 'object') {
-                element.setAttribute('style', transformStyle(prop))
-            } else if (propKey === 'className') {
-                element.setAttribute('class', prop)
-            } else if (propKey !== 'key') {
-                element.setAttribute(propKey, prop)
-            }
+            applyAttribute(element, propKey, nextProp)
         }
-        patchChildrenNode(lastNode, nextNode, lastNode._fiber, null)
+        patchChildrenNode(lastNode, nextNode, lastNode._ref, null)
     }
     if (lastNode.lifecycles.onUpdate) {
         lastNode.lifecycles.onUpdate(lastNode.props, nextNode.props)
     }
-    return nextNode
 
+    return nextNode
 }
 
 export var render = (node, container) => {
@@ -250,15 +228,22 @@ export var render = (node, container) => {
 
 const getProperChild = (child, index) => {
     if (child === null || child === undefined || child === false || child === true || child === '') {
-        return createNode(null, null, [], null, {}, index)
+        return createNode(null, {}, [], null, {}, index, true)
     }
     if (child instanceof Array) {
-        return createNode(null, null, child, null, {}, index)
+        return createNode(null, {}, child, null, {}, index, true)
     }
     if (typeof child === 'object') {
         return { ...child, key: child.key || index }
     }
-    return createNode(null, null, [], "" + child, {}, index)
+    return createNode(null, {}, [], "" + child, {}, index)
+}
+
+export const applyProps = (node, props) => {
+    for (const propKey in props) {
+        node.props[propKey] = props[propKey]
+    }
+    return node
 }
 
 export default (name, props, ...children) => {
@@ -275,28 +260,28 @@ export default (name, props, ...children) => {
     let node;
     if (typeof name === 'function') {
         const update = function (nextNode) {
-
             node.props = nextNode.props
             node.children[0] = patchNode(node.children[0], nextNode)
         }
-        const child = name(
-            { ...finalProps, children: children[0] || finalProps.children },
-            update
-        )
+        const propChild = children[0] || finalProps.children
+        const childProps = propChild
+            ? { ...finalProps, children: propChild }
+            : finalProps
+        const child = name(childProps, update)
         children = [child]
     }
-    const finalChildren = []
+
     for (let i = 0; i < children.length; i++) {
         if (children[i] instanceof Array) {
             const subChildren = []
             for (let j = 0; j < children[i].length; j++) {
                 subChildren.push(getProperChild(children[i][j], j))
             }
-            finalChildren.push(getProperChild(subChildren, i))
+            children[i] = getProperChild(subChildren, i)
         } else {
-            finalChildren.push(getProperChild(children[i], i))
+            children[i] = getProperChild(children[i], i)
         }
     }
 
-    return node = createNode(name, finalProps, finalChildren, null, lifecycles, props.key)
+    return node = createNode(name, finalProps, children, null, lifecycles, props.key)
 }
